@@ -1,7 +1,8 @@
 import json
 import logging
+import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Iterable, Tuple
 
 from procnet.data_processor.basic_processor import BasicProcessor
 from procnet.conf.global_config_manager import GlobalConfigManager
@@ -75,26 +76,174 @@ class DocEEProcessor(BasicProcessor):
     # sidecar path / loading
     # -------------------------------------------------------------------------
 
+    def _iter_default_sidecar_dirs(self) -> Iterable[Path]:
+        """
+        在没有显式传入 typed_entities_dir / typed_entities_files 时，
+        尝试从数据目录、仓库目录、项目目录及常见子目录自动发现 sidecar jsonl。
+        """
+        candidates: List[Path] = []
+
+        env_keys = [
+            "DOCEE_TYPED_ENTITIES_DIR",
+            "PROCNET_TYPED_ENTITIES_DIR",
+            "W2NER_TYPED_ENTITIES_DIR",
+        ]
+        for key in env_keys:
+            value = os.environ.get(key)
+            if value:
+                candidates.append(Path(value))
+
+        cwd = Path.cwd()
+        module_path = Path(__file__).resolve()
+        base_dirs = [
+            self.data_path,
+            self.data_path.parent,
+            self.data_path.parent.parent,
+            cwd,
+            cwd.parent,
+            module_path.parent,
+            module_path.parent.parent,
+            module_path.parent.parent.parent,
+        ]
+
+        subdirs = [
+            None,
+            "typed_entities",
+            "typed_entity",
+            "typed_entity_sidecar",
+            "typed_entity_sidecars",
+            "procnet_entities",
+            "procnet_entity_sidecar",
+            "procnet_entity_sidecars",
+            "w2ner_outputs",
+            "w2ner_output",
+            "w2ner",
+            "outputs",
+        ]
+
+        for base_dir in base_dirs:
+            if base_dir is None:
+                continue
+            for subdir in subdirs:
+                candidates.append(base_dir if subdir is None else base_dir / subdir)
+
+        seen = set()
+        for candidate in candidates:
+            try:
+                candidate = candidate.expanduser().resolve()
+            except Exception:
+                candidate = candidate.expanduser()
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.exists() and candidate.is_dir():
+                yield candidate
+
+    def _sidecar_filename_candidates(self, split_name: str) -> List[str]:
+        return [
+            f"{split_name}_doc_typed_entities.jsonl",
+            f"{split_name}_typed_entities.jsonl",
+            f"{split_name}_doc_procnet_entities.jsonl",
+            f"{split_name}_procnet_entities.jsonl",
+            f"{split_name}_doc_pred_entities.jsonl",
+            f"{split_name}_pred_entities.jsonl",
+            f"{split_name}_doc_entities.jsonl",
+            f"{split_name}_entities.jsonl",
+            f"{split_name}.jsonl",
+        ]
+    def _get_sidecar_candidate_filenames(self) -> Dict[str, List[str]]:
+        return {
+            "train": [
+                "train_doc_typed_entities.jsonl",
+                "train_typed_entities.jsonl",
+                "train.jsonl",
+                "tmp_train_doc_typed_entities.jsonl",
+            ],
+            "dev": [
+                "dev_doc_typed_entities.jsonl",
+                "dev_typed_entities.jsonl",
+                "dev.jsonl",
+                "tmp_dev_doc_typed_entities.jsonl",
+            ],
+            "test": [
+                "test_doc_typed_entities.jsonl",
+                "test_typed_entities.jsonl",
+                "test.jsonl",
+                "tmp_test_doc_typed_entities.jsonl",
+            ],
+        }
+
+
+    def _get_default_sidecar_search_dirs(self) -> List[Path]:
+        dirs = []
+        seen = set()
+
+        def _add(p: Path):
+            p = Path(p)
+            try:
+                key = str(p.resolve()) if p.exists() else str(p)
+            except Exception:
+                key = str(p)
+            if key not in seen:
+                seen.add(key)
+                dirs.append(p)
+
+        data_parent = self.data_path.parent
+        _add(data_parent / "tmp_sidecar")
+        _add(data_parent)
+
+        cwd = Path.cwd()
+        _add(cwd / "tmp_sidecar")
+        _add(cwd)
+        _add(cwd.parent / "tmp_sidecar")
+        _add(cwd.parent)
+
+        return dirs
+
+
+    def _auto_detect_sidecar_paths(self) -> Dict[str, Path]:
+        result: Dict[str, Path] = {}
+        candidates = self._get_sidecar_candidate_filenames()
+
+        for base_dir in self._get_default_sidecar_search_dirs():
+            if not base_dir.exists() or not base_dir.is_dir():
+                continue
+
+            for split_name, names in candidates.items():
+                if split_name in result:
+                    continue
+                for name in names:
+                    p = base_dir / name
+                    if p.exists():
+                        result[split_name] = p
+                        logging.info(
+                            "Auto-detected typed entity sidecar for split=%s: %s",
+                            split_name,
+                            str(p),
+                        )
+                        break
+
+        return result
+
     def _resolve_sidecar_paths(
-        self,
-        typed_entities_dir: Optional[Union[str, Path]],
-        typed_entities_files: Optional[Dict[str, Union[str, Path]]],
+    self,
+    typed_entities_dir: Optional[Union[str, Path]],
+    typed_entities_files: Optional[Dict[str, Union[str, Path]]],
     ) -> Dict[str, Path]:
         """
-        支持两种传法：
+        支持三种来源：
         1) typed_entities_dir:
-           目录下默认寻找：
-             train_doc_typed_entities.jsonl
-             dev_doc_typed_entities.jsonl
-             test_doc_typed_entities.jsonl
-           若不存在，再尝试：
-             train.jsonl / dev.jsonl / test.jsonl
-             train_typed_entities.jsonl / dev_typed_entities.jsonl / test_typed_entities.jsonl
-
+        显式给 sidecar 目录
         2) typed_entities_files:
-           {"train": "...", "dev": "...", "test": "..."}
+        {"train": "...", "dev": "...", "test": "..."}
+        3) 都不传时自动探测：
+        - <dataset_parent>/tmp_sidecar/
+        - <dataset_parent>/
+        - cwd/tmp_sidecar/
+        - cwd/
         """
         result: Dict[str, Path] = {}
+        candidates = self._get_sidecar_candidate_filenames()
 
         if typed_entities_files:
             for split_name, file_path in typed_entities_files.items():
@@ -104,39 +253,34 @@ class DocEEProcessor(BasicProcessor):
 
         if typed_entities_dir is not None:
             base_dir = Path(typed_entities_dir)
-            candidates = {
-                "train": [
-                    "train_doc_typed_entities.jsonl",
-                    "train_typed_entities.jsonl",
-                    "train.jsonl",
-                ],
-                "dev": [
-                    "dev_doc_typed_entities.jsonl",
-                    "dev_typed_entities.jsonl",
-                    "dev.jsonl",
-                ],
-                "test": [
-                    "test_doc_typed_entities.jsonl",
-                    "test_typed_entities.jsonl",
-                    "test.jsonl",
-                ],
-            }
-            for split_name, names in candidates.items():
-                if split_name in result:
-                    continue
-                for name in names:
-                    p = base_dir / name
-                    if p.exists():
-                        result[split_name] = p
-                        break
+            if not base_dir.exists() or not base_dir.is_dir():
+                logging.warning("Typed entity sidecar dir not found: %s", str(base_dir))
+            else:
+                for split_name, names in candidates.items():
+                    if split_name in result:
+                        continue
+                    for name in names:
+                        p = base_dir / name
+                        if p.exists():
+                            result[split_name] = p
+                            break
+
+        if not result and typed_entities_dir is None and not typed_entities_files:
+            result.update(self._auto_detect_sidecar_paths())
 
         existing = {}
         for split_name, p in result.items():
             if p.exists():
                 existing[split_name] = p
             else:
-                logging.warning("Typed entity sidecar for split=%s not found: %s", split_name, str(p))
+                logging.warning(
+                    "Typed entity sidecar for split=%s not found: %s",
+                    split_name,
+                    str(p),
+                )
         return existing
+
+
     def get_docs_with_typed_entities(self, split_name="test"):
         if split_name == "train":
             docs = self.train_docs
@@ -433,26 +577,147 @@ class DocEEProcessor(BasicProcessor):
     # parsing
     # -------------------------------------------------------------------------
 
+    def _normalize_doc_id_for_sidecar_match(self, doc_id: Optional[str]) -> Optional[str]:
+        if doc_id is None:
+            return None
+        doc_id = str(doc_id).strip()
+        if not doc_id:
+            return None
+        lowered = doc_id.lower()
+        for suffix in (".json", ".jsonl", ".txt"):
+            if lowered.endswith(suffix):
+                doc_id = doc_id[: -len(suffix)]
+                lowered = doc_id.lower()
+        return lowered
+
+    def _collect_typed_entities_from_any_sidecar(
+        self,
+        doc_id: str,
+        split_name: Optional[str] = None,
+    ) -> Tuple[List[DocEETypedEntity], Optional[str]]:
+        if not self.sidecar_by_split:
+            return [], None
+
+        normalized_doc_id = self._normalize_doc_id_for_sidecar_match(doc_id)
+        split_order: List[str] = []
+        if split_name is not None and split_name in self.sidecar_by_split:
+            split_order.append(split_name)
+        split_order.extend([x for x in self.sidecar_by_split.keys() if x not in split_order])
+
+        for one_split in split_order:
+            doc_map = self.sidecar_by_split.get(one_split, {})
+            if doc_id in doc_map:
+                return list(doc_map[doc_id]), one_split
+
+        if normalized_doc_id is None:
+            return [], None
+
+        for one_split in split_order:
+            doc_map = self.sidecar_by_split.get(one_split, {})
+            for cand_doc_id, typed_entities in doc_map.items():
+                if self._normalize_doc_id_for_sidecar_match(cand_doc_id) == normalized_doc_id:
+                    logging.warning(
+                        "Relaxed typed-entity sidecar doc match: requested=%s matched=%s split=%s",
+                        doc_id,
+                        cand_doc_id,
+                        one_split,
+                    )
+                    return list(typed_entities), one_split
+
+        return [], None
+
+    def _typed_entity_to_procnet_entity(self, ent: DocEETypedEntity) -> Dict[str, Any]:
+        sent_id = int(getattr(ent, "sent_id"))
+        b = int(getattr(ent, "b"))
+        e = int(getattr(ent, "e"))
+        type_id = getattr(ent, "type_id", None)
+        type_id = int(type_id) if type_id is not None else -1
+        field = getattr(ent, "type_name", None)
+        if field is None and type_id in self.procnet_type_id2field:
+            field = self.procnet_type_id2field[type_id]
+
+        key = getattr(ent, "cluster_key", None)
+        if key is None:
+            key = getattr(ent, "key", None)
+        if key is None:
+            key = [b, e, type_id]
+
+        procnet_span_key = getattr(ent, "procnet_span_key", None)
+        if procnet_span_key is None:
+            procnet_span_key = [sent_id, b, e]
+
+        return {
+            "key": key,
+            "cluster_key": key,
+            "global_key": [sent_id, b, e, type_id],
+            "procnet_span_key": procnet_span_key,
+            "token_indices": list(getattr(ent, "token_indices", list(range(b, e)))),
+            "b": b,
+            "e": e,
+            "type_id": type_id,
+            "field": field,
+            "score": float(getattr(ent, "score", 1.0) if getattr(ent, "score", None) is not None else 1.0),
+            "head": getattr(ent, "head", None),
+            "span": getattr(ent, "text", "") or "",
+            "positions": [[sent_id, b, e]],
+        }
+
     def _attach_typed_entities_from_sidecar(
         self,
         doc: DocEEDocumentExample,
         split_name: Optional[str] = None,
     ) -> None:
-        typed_entities = []
-        if split_name is not None and split_name in self.sidecar_by_split:
-            typed_entities = self.sidecar_by_split[split_name].get(doc.doc_id, [])
+        typed_entities, matched_split = self._collect_typed_entities_from_any_sidecar(
+            doc_id=doc.doc_id,
+            split_name=split_name,
+        )
 
         if self.sidecar_strict_doc_match and split_name in self.sidecar_by_split:
-            if doc.doc_id not in self.sidecar_by_split[split_name]:
+            if not typed_entities:
                 raise KeyError(
                     f"Missing typed-entity sidecar for split={split_name}, doc_id={doc.doc_id}"
                 )
 
         doc.typed_entities = list(typed_entities)
-        doc.refresh_entity_node_cache()
+        if hasattr(doc, "refresh_entity_node_cache"):
+            doc.refresh_entity_node_cache()
 
         doc.has_typed_entities = len(doc.typed_entities) > 0
-        doc.typed_entity_source = "sidecar_jsonl" if doc.has_typed_entities else "none"
+        doc.typed_entity_source = f"sidecar_jsonl:{matched_split}" if doc.has_typed_entities and matched_split else "none"
+
+        if self.use_procnet_pred_entities and len(doc.typed_entities) > 0:
+            typed_procnet_entities = [self._typed_entity_to_procnet_entity(ent) for ent in doc.typed_entities]
+            if len(getattr(doc, "procnet_entities", [])) == 0:
+                doc.procnet_entities = typed_procnet_entities
+                doc.procnet_entity_source = f"typed_entities:{matched_split}" if matched_split else "typed_entities"
+            else:
+                existing = list(getattr(doc, "procnet_entities", []))
+                seen = {
+                    tuple(x.get("positions", [[-1, -1, -1]])[0]) + (x.get("type_id", -1),)
+                    for x in existing
+                }
+                for one in typed_procnet_entities:
+                    uniq = tuple(one["positions"][0]) + (one.get("type_id", -1),)
+                    if uniq in seen:
+                        continue
+                    seen.add(uniq)
+                    existing.append(one)
+                existing.sort(
+                    key=lambda x: (
+                        x["positions"][0][0],
+                        x["positions"][0][1],
+                        x["positions"][0][2],
+                        x.get("type_id", -1),
+                    )
+                )
+                doc.procnet_entities = existing
+                if getattr(doc, "procnet_entity_source", None) in (None, "gold_only"):
+                    doc.procnet_entity_source = f"inline_json+typed_entities:{matched_split}" if matched_split else "inline_json+typed_entities"
+
+        doc.has_procnet_entities = len(getattr(doc, "procnet_entities", [])) > 0
+        if not doc.has_procnet_entities and getattr(doc, "procnet_entity_source", None) is None:
+            doc.procnet_entity_source = "gold_only"
+
     def _unwrap_json_item(self, json_item):
         """
         兼容几种输入格式：
