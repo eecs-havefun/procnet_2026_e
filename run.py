@@ -27,6 +27,14 @@ def parse_args(in_args=None):
 
 def get_config(args) -> DocEEConfig:
     config = DocEEConfig()
+    config.return_procnet_entity_nodes = True
+    config.use_procnet_entity_nodes = True
+    config.use_procnet_pred_entities = True
+    config.proxy_slot_num = getattr(config, "proxy_slot_num", None) or 16
+    config.node_size = getattr(config, "node_size", None) or 512
+    config.max_len = getattr(config, "max_len", None) or 510
+    config.max_epochs = getattr(config, "max_epochs", None) or 1
+    ###above has been modified
     config.model_save_name = args.run_save_name
     config.node_size = 512
     config.proxy_slot_num = 16
