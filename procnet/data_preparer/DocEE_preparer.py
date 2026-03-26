@@ -1,5 +1,6 @@
+
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Iterable, Tuple
 
 import torch
 import torch.utils.data
@@ -18,11 +19,15 @@ class DocEEPreparer(BasicPreparer):
         super().__init__(model_name=config.model_name)
         self.config = config
 
-        # keep this stage backward-compatible:
-        # no need to edit DocEE_conf.py immediately
+        # stage-1 compatibility flags:
+        # these attributes can be added to DocEE_conf.py later, but are optional now.
         self.use_procnet_entity_nodes = getattr(config, "use_procnet_entity_nodes", False)
         self.return_procnet_entity_nodes = getattr(config, "return_procnet_entity_nodes", False)
         self.keep_gold_bio = getattr(config, "keep_gold_bio", True)
+        self.procnet_entity_key_mode = getattr(config, "procnet_entity_key_mode", "token_ids")
+        self.procnet_entity_include_type_in_key = getattr(
+            config, "procnet_entity_include_type_in_key", False
+        )
 
         self.seq_label_BIO_tag_set = set()
         self.seq_label_category_set = set()
@@ -38,7 +43,10 @@ class DocEEPreparer(BasicPreparer):
         ]
 
         [self.tokenize_sentences(x) for x in self.all_docs]
-        [[self.longer_sentence_process_simple_cut(doc, self.config.max_len) for doc in docs] for docs in self.all_docs]
+        [
+            [self.longer_sentence_process_simple_cut(doc, self.config.max_len) for doc in docs]
+            for docs in self.all_docs
+        ]
 
         # keep original BIO path for now
         [[self.seq_label_BIO_tags_generate(doc) for doc in one_docs] for one_docs in self.all_docs]
@@ -103,7 +111,8 @@ class DocEEPreparer(BasicPreparer):
 
         self.event_role_index_to_relation = ["Null"] + sorted(list(self.event_role_label_set))
         self.event_role_relation_to_index = {
-            self.event_role_index_to_relation[i]: i for i in range(len(self.event_role_index_to_relation))
+            self.event_role_index_to_relation[i]: i
+            for i in range(len(self.event_role_index_to_relation))
         }
 
         self.event_schema_index = {}
@@ -113,14 +122,9 @@ class DocEEPreparer(BasicPreparer):
             self.event_schema_index[new_k] = new_v
 
         # ----------------------------
-        # NEW: procnet type vocab
+        # procnet typed-entity vocab
         # ----------------------------
-        self.procnet_type_ids = sorted({
-            ent["type_id"]
-            for docs in self.all_docs
-            for doc in docs
-            for ent in getattr(doc, "procnet_entities", [])
-        })
+        self.procnet_type_ids = self._collect_procnet_type_ids()
         self.procnet_type_index_to_id = [-1] + self.procnet_type_ids
         self.procnet_type_id_to_index = {
             type_id: idx for idx, type_id in enumerate(self.procnet_type_index_to_id)
@@ -190,6 +194,126 @@ class DocEEPreparer(BasicPreparer):
                     self.seq_label_BIO_tag_set.add(I_tag)
         doc.seq_BIO_tags = BIO_tags
 
+    # ----------------------------
+    # typed-entity helpers
+    # ----------------------------
+    def _collect_procnet_type_ids(self) -> List[int]:
+        type_ids = set()
+        for docs in self.all_docs:
+            for doc in docs:
+                for ent in self._get_doc_sidecar_entities(doc):
+                    type_id = ent.get("type_id", None)
+                    if type_id is None:
+                        continue
+                    try:
+                        type_ids.add(int(type_id))
+                    except Exception:
+                        continue
+        return sorted(type_ids)
+
+    def _get_doc_sidecar_entities(self, doc: DocEEDocumentExample) -> List[Dict[str, Any]]:
+        """
+        Normalize whatever the processor/doc example currently exposes.
+
+        Supported sources:
+        - doc.procnet_entities              (dict list)
+        - doc.typed_entities                (dataclass / dict list)
+        - doc.entity_nodes                  (dict list)
+        """
+        raw_entities = None
+        for attr_name in ["procnet_entities", "typed_entities", "entity_nodes"]:
+            if hasattr(doc, attr_name):
+                candidate = getattr(doc, attr_name)
+                if candidate:
+                    raw_entities = candidate
+                    break
+        if raw_entities is None:
+            return []
+        return [self._entity_like_to_dict(x) for x in raw_entities]
+
+    def _entity_like_to_dict(self, ent: Any) -> Dict[str, Any]:
+        if isinstance(ent, dict):
+            return dict(ent)
+        if hasattr(ent, "to_dict") and callable(ent.to_dict):
+            return dict(ent.to_dict())
+        if hasattr(ent, "__dict__"):
+            return dict(ent.__dict__)
+        raise TypeError("Unsupported typed entity object type: {}".format(type(ent)))
+
+    def _safe_int(self, value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    def _normalize_positions(self, ent: Dict[str, Any]) -> List[List[int]]:
+        """
+        Convert entity position payload into a normalized list of [sent_idx, b, e].
+        """
+        positions = ent.get("positions", None)
+        if positions:
+            normalized_positions = []
+            for pos in positions:
+                if pos is None or len(pos) < 3:
+                    continue
+                normalized_positions.append([
+                    self._safe_int(pos[0]),
+                    self._safe_int(pos[1]),
+                    self._safe_int(pos[2]),
+                ])
+            if normalized_positions:
+                return normalized_positions
+
+        sent_idx = ent.get("sent_id", ent.get("sent_idx", None))
+        b = ent.get("b", ent.get("start", ent.get("token_start", None)))
+        e = ent.get("e", ent.get("end", ent.get("token_end", None)))
+        if sent_idx is None or b is None or e is None:
+            return []
+        return [[self._safe_int(sent_idx), self._safe_int(b), self._safe_int(e)]]
+
+    def _iter_entity_mentions(self, ent: Dict[str, Any]) -> Iterable[Tuple[int, int, int, int]]:
+        positions = self._normalize_positions(ent)
+        for pos_idx, pos in enumerate(positions):
+            if len(pos) < 3:
+                continue
+            sent_idx, b, e = pos[:3]
+            if e <= b:
+                continue
+            yield pos_idx, sent_idx, b, e
+
+    def _sentence_start_offsets(self, sentence_tokens: List[List[str]]) -> List[int]:
+        """
+        Offsets in the flattened fragment sequence that includes a leading [CLS].
+        Example:
+            sent0 len=5 -> starts at 1
+            sent1 len=7 -> starts at 6
+        """
+        starts = []
+        cur = 1
+        for sent in sentence_tokens:
+            starts.append(cur)
+            cur += len(sent)
+        return starts
+
+    def _build_procnet_span_key(
+        self,
+        token_ids: List[int],
+        sent_idx: int,
+        b: int,
+        e: int,
+        type_id: int,
+    ):
+        if self.procnet_entity_key_mode == "position":
+            base_key = (sent_idx, b, e)
+        else:
+            base_key = tuple(token_ids)
+
+        if self.procnet_entity_include_type_in_key:
+            if isinstance(base_key, tuple):
+                return base_key + (type_id,)
+            return tuple(list(base_key) + [type_id])
+        return base_key
+
     def longer_sentence_process_simple_cut(self, doc: DocEEDocumentExample, max_len: int):
         all_short = True
         for sentence in doc.sentences_token:
@@ -221,18 +345,39 @@ class DocEEPreparer(BasicPreparer):
                         new_positions.append(pos)
                 entity.positions = new_positions
 
-        # NEW: procnet sidecar entities
-        if hasattr(doc, "procnet_entities"):
-            new_procnet_entities = []
-            for ent in doc.procnet_entities:
-                sent_idx, b, e = ent["positions"][0]
-                if sent_idx in cut_record and e > max_len:
+        # sidecar typed entities / procnet entities
+        for attr_name in ["procnet_entities", "typed_entities", "entity_nodes"]:
+            if not hasattr(doc, attr_name):
+                continue
+            raw_entities = getattr(doc, attr_name)
+            if not raw_entities:
+                continue
+
+            new_entities = []
+            for raw_ent in raw_entities:
+                ent = self._entity_like_to_dict(raw_ent)
+                kept_positions = []
+                for pos in self._normalize_positions(ent):
+                    sent_idx, b, e = pos
+                    if sent_idx in cut_record and e > max_len:
+                        continue
+                    kept_positions.append([sent_idx, b, e])
+                if not kept_positions:
                     continue
-                new_procnet_entities.append(ent)
-            doc.procnet_entities = new_procnet_entities
+
+                if isinstance(raw_ent, dict):
+                    new_ent = dict(raw_ent)
+                    new_ent["positions"] = kept_positions
+                    new_entities.append(new_ent)
+                else:
+                    if hasattr(raw_ent, "positions"):
+                        raw_ent.positions = kept_positions
+                    new_entities.append(raw_ent)
+
+            setattr(doc, attr_name, new_entities)
 
     # ----------------------------
-    # NEW: fragment-level typed entity nodes
+    # fragment-level typed entity nodes
     # ----------------------------
     def build_procnet_entity_nodes_for_fragment(
         self,
@@ -241,53 +386,114 @@ class DocEEPreparer(BasicPreparer):
         end_sen: int,
         tokenizer,
     ) -> List[Dict[str, Any]]:
+        """
+        Build fragment-local node dicts from sidecar typed entities.
+
+        Important design choices:
+        - one node per mention/span, not per cluster
+        - keep document-level ids and add fragment-local ids
+        - preserve both:
+            * procnet_span_key : key later ProcNet components can align on
+            * w2ner_key        : provenance / debugging key
+        - provide flat_b / flat_e so the model can directly slice hidden states
+          from the flattened fragment sequence without reconstructing offsets again
+        """
         nodes = []
+        fragment_sentence_tokens = example.sentences_token[start_sen:end_sen]
+        fragment_sentence_starts = self._sentence_start_offsets(fragment_sentence_tokens)
 
-        for ent in getattr(example, "procnet_entities", []):
-            sent_idx, b, e = ent["positions"][0]
+        node_id = -1
+        for ent in self._get_doc_sidecar_entities(example):
+            type_id = self._safe_int(ent.get("type_id", -1), -1)
+            type_index = self.procnet_type_id_to_index.get(type_id, 0)
+            field = ent.get("field", ent.get("type_name", ent.get("label", None)))
 
-            if sent_idx < start_sen or sent_idx >= end_sen:
-                continue
+            for mention_idx, sent_idx, b, e in self._iter_entity_mentions(ent):
+                if sent_idx < start_sen or sent_idx >= end_sen:
+                    continue
 
-            local_sent_idx = sent_idx - start_sen
-            sent_tokens = example.sentences_token[sent_idx]
-            span_tokens = sent_tokens[b:e]
-            span_token_ids = tokenizer.convert_tokens_to_ids(span_tokens)
+                local_sent_idx = sent_idx - start_sen
+                sent_tokens = example.sentences_token[sent_idx]
 
-            node = {
-                # stable ids
-                "cluster_key": ent["cluster_key"],                # [b, e, type_id]
-                "global_key": ent["global_key"],                  # [sent_idx, b, e, type_id]
-                "local_key": [local_sent_idx, b, e, ent["type_id"]],
+                if b < 0 or e > len(sent_tokens) or e <= b:
+                    continue
 
-                # span position
-                "global_sent_idx": sent_idx,
-                "sent_idx": local_sent_idx,
-                "b": b,
-                "e": e,
+                span_tokens = sent_tokens[b:e]
+                token_ids = tokenizer.convert_tokens_to_ids(span_tokens)
 
-                # typed info
-                "type_id": ent["type_id"],
-                "type_index": self.procnet_type_id_to_index.get(ent["type_id"], 0),
-                "field": ent.get("field", None),
+                sentence_flat_start = fragment_sentence_starts[local_sent_idx]
+                flat_b = sentence_flat_start + b
+                flat_e = sentence_flat_start + e
+                flat_token_indices = list(range(flat_b, flat_e))
 
-                # confidence / structural info
-                "score": ent.get("score", 1.0),
-                "head": ent.get("head", None),
+                procnet_span_key = self._build_procnet_span_key(
+                    token_ids=token_ids,
+                    sent_idx=sent_idx,
+                    b=b,
+                    e=e,
+                    type_id=type_id,
+                )
+                w2ner_key = (sent_idx, b, e, type_id)
 
-                # content
-                "span": ent.get("span", None),
-                "token_indices": ent.get("token_indices", list(range(b, e))),
-                "token_ids": span_token_ids,
-            }
-            nodes.append(node)
+                node_id += 1
+                node = {
+                    # stable ids / provenance
+                    "node_id": node_id,
+                    "cluster_key": ent.get("cluster_key", (b, e, type_id)),
+                    "global_key": ent.get("global_key", (sent_idx, b, e, type_id)),
+                    "local_key": (local_sent_idx, b, e, type_id),
+                    "w2ner_key": ent.get("w2ner_key", w2ner_key),
+                    "procnet_span_key": ent.get("procnet_span_key", procnet_span_key),
+                    "mention_index": mention_idx,
 
-        nodes.sort(key=lambda x: (
-            x["global_sent_idx"],
-            x["b"],
-            x["e"],
-            x["type_id"],
-        ))
+                    # fragment and position info
+                    "fragment_start_sen": start_sen,
+                    "fragment_end_sen": end_sen,
+                    "global_sent_idx": sent_idx,
+                    "sent_idx": local_sent_idx,
+                    "fragment_sent_id": local_sent_idx,
+                    "b": b,
+                    "e": e,
+                    "flat_b": flat_b,
+                    "flat_e": flat_e,
+
+                    # typed info
+                    "type_id": type_id,
+                    "type_index": type_index,
+                    "field": field,
+                    "type_name": field,
+
+                    # confidence / structure
+                    "score": ent.get("score", 1.0),
+                    "head": ent.get("head", None),
+
+                    # content
+                    "text": ent.get("text", ent.get("span", None)),
+                    "span": ent.get("span", ent.get("text", None)),
+                    "token_indices": ent.get("token_indices", list(range(b, e))),
+                    "flat_token_indices": flat_token_indices,
+                    "token_ids": token_ids,
+                    "span_tokens": span_tokens,
+
+                    # keep raw payload for debugging
+                    "raw_w2ner": ent.get("raw_w2ner", ent.get("raw", None)),
+                }
+                nodes.append(node)
+
+        nodes.sort(
+            key=lambda x: (
+                x["global_sent_idx"],
+                x["b"],
+                x["e"],
+                x["type_id"],
+                x["mention_index"],
+            )
+        )
+
+        # reassign node ids after sort for stable ordering inside fragment
+        for idx, node in enumerate(nodes):
+            node["node_id"] = idx
+
         return nodes
 
     def get_loader_for_flattened_fragment_before_event(self):
@@ -343,16 +549,21 @@ class DocEEPreparer(BasicPreparer):
                     BIO_id = [self.seq_BIO_tag_to_index[x] for x in BIO_tags]
                     BIO_ids.append(torch.LongTensor(BIO_id))
 
-                    # NEW: build fragment-local typed entity nodes
-                    one_fragment_nodes = self.build_procnet_entity_nodes_for_fragment(
-                        example=example,
-                        start_sen=frag_start,
-                        end_sen=frag_end,
-                        tokenizer=this.tokenizer,
-                    )
+                    # build fragment-local typed entity nodes
+                    if this.preparer.return_procnet_entity_nodes or this.preparer.use_procnet_entity_nodes:
+                        one_fragment_nodes = self.build_procnet_entity_nodes_for_fragment(
+                            example=example,
+                            start_sen=frag_start,
+                            end_sen=frag_end,
+                            tokenizer=this.tokenizer,
+                        )
+                    else:
+                        one_fragment_nodes = []
                     procnet_entity_nodes.append(one_fragment_nodes)
 
-                # original event label
+                # original event label path kept as the default for full backward compatibility.
+                # The later trainer/model thin-adapter can consume procnet_entity_nodes and choose
+                # node["procnet_span_key"] as the actual span alignment key.
                 events_label = []
                 for event in example.events:
                     event_label = {}
@@ -365,8 +576,6 @@ class DocEEPreparer(BasicPreparer):
                                 event_label[tuple(v_id)] = self.event_role_relation_to_index[k]
                     events_label.append(event_label)
 
-                # IMPORTANT:
-                # stage-1 default: keep original 5-tuple for full backward compatibility
                 if this.preparer.return_procnet_entity_nodes:
                     return (
                         doc_id,
