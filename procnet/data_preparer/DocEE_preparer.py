@@ -134,6 +134,8 @@ class DocEEPreparer(BasicPreparer):
         self.dev_docs = self.all_docs[1]
         self.test_docs = self.all_docs[2]
 
+        self._log_procnet_sidecar_coverage()
+
         pos_event_num_total = 0
         for doc in self.train_docs:
             pos_event_num_total += len(doc.events)
@@ -314,6 +316,149 @@ class DocEEPreparer(BasicPreparer):
             return tuple(list(base_key) + [type_id])
         return base_key
 
+    def _get_entity_type_name(self, ent: Dict[str, Any]):
+        return ent.get(
+            "field",
+            ent.get(
+                "type_name",
+                ent.get(
+                    "type",
+                    ent.get("label", None)
+                )
+            )
+        )
+
+    def _count_doc_sidecar_entities(self, doc: DocEEDocumentExample) -> int:
+        try:
+            return len(self._get_doc_sidecar_entities(doc))
+        except Exception:
+            return 0
+
+    def _log_procnet_sidecar_coverage(self):
+        split_docs = [
+            ("train", self.all_docs[0]),
+            ("dev", self.all_docs[1]),
+            ("test", self.all_docs[2]),
+        ]
+        for split_name, docs in split_docs:
+            docs_with_entities = 0
+            entity_total = 0
+            for doc in docs:
+                ent_count = self._count_doc_sidecar_entities(doc)
+                if ent_count > 0:
+                    docs_with_entities += 1
+                    entity_total += ent_count
+            logging.info(
+                "procnet sidecar coverage split=%s docs_with_entities=%s/%s entities=%s",
+                split_name,
+                docs_with_entities,
+                len(docs),
+                entity_total,
+            )
+
+    def find_dataset_item_by_doc_id(self, target_doc_id: str):
+        if not target_doc_id:
+            return None, None, None
+
+        tokenizer = self.get_auto_tokenizer()
+
+        class MyDataSet(Dataset):
+            def __init__(this, split_name: str, examples: List[DocEEDocumentExample], preparer, tokenizer):
+                this.split_name = split_name
+                this.examples = examples
+                this.preparer = preparer
+                this.tokenizer = tokenizer
+
+            def __len__(this):
+                return len(this.examples)
+
+            def __getitem__(this, index):
+                example = this.examples[index]
+                total_sentence_nums = len(example.sentences_token)
+
+                sub_examples = []
+                sub_ranges = []
+
+                start = 0
+                end = 0
+                while end < total_sentence_nums:
+                    end = self.find_end_pos_for_max_len(
+                        doc=example, start=start, max_len=self.config.max_len
+                    )
+                    sub_example = example.get_fragment(start_sen=start, end_sen=end)
+                    sub_examples.append(sub_example)
+                    sub_ranges.append((start, end))
+                    start = end
+
+                doc_id = example.doc_id
+                input_ids = []
+                input_att_masks = []
+                BIO_ids = []
+                procnet_entity_nodes = []
+
+                for sub_example, (frag_start, frag_end) in zip(sub_examples, sub_ranges):
+                    input_token = [this.tokenizer.cls_token]
+                    for x in sub_example.sentences_token:
+                        input_token += x
+                    input_id = this.tokenizer.convert_tokens_to_ids(input_token)
+                    input_ids.append(torch.LongTensor(input_id))
+
+                    input_att_mask = [1] * len(input_id)
+                    input_att_masks.append(torch.LongTensor(input_att_mask))
+
+                    BIO_tags = ["O"]
+                    for x in sub_example.seq_BIO_tags:
+                        BIO_tags += x
+                    BIO_id = [self.seq_BIO_tag_to_index[x] for x in BIO_tags]
+                    BIO_ids.append(torch.LongTensor(BIO_id))
+
+                    if this.preparer.return_procnet_entity_nodes or this.preparer.use_procnet_entity_nodes:
+                        one_fragment_nodes = self.build_procnet_entity_nodes_for_fragment(
+                            example=example,
+                            start_sen=frag_start,
+                            end_sen=frag_end,
+                            tokenizer=this.tokenizer,
+                        )
+                    else:
+                        one_fragment_nodes = []
+                    procnet_entity_nodes.append(one_fragment_nodes)
+
+                events_label = []
+                for event in example.events:
+                    event_label = {}
+                    for k, v in event.items():
+                        if k == "EventType":
+                            event_label[k] = self.event_type_type_to_index[v]
+                        else:
+                            if v is not None:
+                                v_id = this.tokenizer.convert_tokens_to_ids(self.my_tokenize(v))
+                                event_label[tuple(v_id)] = self.event_role_relation_to_index[k]
+                    events_label.append(event_label)
+
+                if this.preparer.return_procnet_entity_nodes:
+                    return (
+                        doc_id,
+                        input_ids,
+                        input_att_masks,
+                        BIO_ids,
+                        events_label,
+                        procnet_entity_nodes,
+                    )
+
+                return doc_id, input_ids, input_att_masks, BIO_ids, events_label
+
+        split_specs = [
+            ("train", self.train_docs),
+            ("dev", self.dev_docs),
+            ("test", self.test_docs),
+        ]
+        for split_name, docs in split_specs:
+            dataset = MyDataSet(split_name, docs, self, tokenizer)
+            for idx, doc in enumerate(docs):
+                if getattr(doc, "doc_id", None) == target_doc_id:
+                    return split_name, idx, dataset[idx]
+        return None, None, None
+
     def longer_sentence_process_simple_cut(self, doc: DocEEDocumentExample, max_len: int):
         all_short = True
         for sentence in doc.sentences_token:
@@ -368,6 +513,10 @@ class DocEEPreparer(BasicPreparer):
                 if isinstance(raw_ent, dict):
                     new_ent = dict(raw_ent)
                     new_ent["positions"] = kept_positions
+                    if len(kept_positions) == 1:
+                        new_ent["sent_id"] = kept_positions[0][0]
+                        new_ent["b"] = kept_positions[0][1]
+                        new_ent["e"] = kept_positions[0][2]
                     new_entities.append(new_ent)
                 else:
                     if hasattr(raw_ent, "positions"):
@@ -406,7 +555,7 @@ class DocEEPreparer(BasicPreparer):
         for ent in self._get_doc_sidecar_entities(example):
             type_id = self._safe_int(ent.get("type_id", -1), -1)
             type_index = self.procnet_type_id_to_index.get(type_id, 0)
-            field = ent.get("field", ent.get("type_name", ent.get("label", None)))
+            field = self._get_entity_type_name(ent)
 
             for mention_idx, sent_idx, b, e in self._iter_entity_mentions(ent):
                 if sent_idx < start_sen or sent_idx >= end_sen:
@@ -501,7 +650,8 @@ class DocEEPreparer(BasicPreparer):
 
         class MyDataSet(Dataset):
 
-            def __init__(this, examples: List[DocEEDocumentExample], preparer, tokenizer):
+            def __init__(this, split_name: str, examples: List[DocEEDocumentExample], preparer, tokenizer):
+                this.split_name = split_name
                 this.examples = examples
                 this.preparer = preparer
                 this.tokenizer = tokenizer
@@ -588,9 +738,9 @@ class DocEEPreparer(BasicPreparer):
 
                 return doc_id, input_ids, input_att_masks, BIO_ids, events_label
 
-        train_dataset = MyDataSet(self.train_docs, self, tokenizer)
-        dev_dataset = MyDataSet(self.dev_docs, self, tokenizer)
-        test_dataset = MyDataSet(self.test_docs, self, tokenizer)
+        train_dataset = MyDataSet("train", self.train_docs, self, tokenizer)
+        dev_dataset = MyDataSet("dev", self.dev_docs, self, tokenizer)
+        test_dataset = MyDataSet("test", self.test_docs, self, tokenizer)
 
         logging.info(
             "dataset {} train, {} dev, {} test".format(
