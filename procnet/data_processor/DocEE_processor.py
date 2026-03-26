@@ -26,12 +26,17 @@ class DocEEProcessor(BasicProcessor):
         typed_entities_dir: Optional[Union[str, Path]] = None,
         typed_entities_files: Optional[Dict[str, Union[str, Path]]] = None,
         sidecar_strict_doc_match: bool = False,
+        dataset_dir: Optional[Union[str, Path]] = None,
     ):
         super().__init__()
-        self.data_path = GlobalConfigManager.get_dataset_path()
-        if read_pseudo_dataset:
-            self.data_path = GlobalConfigManager.get_pseudo_Doc2EDAG_path()
+        if dataset_dir is not None:
+            self.data_path = Path(dataset_dir)
+        else:
+            self.data_path = GlobalConfigManager.get_dataset_path()
+            if read_pseudo_dataset:
+                self.data_path = GlobalConfigManager.get_pseudo_Doc2EDAG_path()
 
+        logging.info("DocEEProcessor dataset path: %s", str(self.data_path))
         self.use_procnet_pred_entities = use_procnet_pred_entities
         self.procnet_entity_field = procnet_entity_field
         self.typed_entity_field = typed_entity_field
@@ -132,6 +137,14 @@ class DocEEProcessor(BasicProcessor):
             else:
                 logging.warning("Typed entity sidecar for split=%s not found: %s", split_name, str(p))
         return existing
+    def get_docs_with_typed_entities(self, split_name="test"):
+        if split_name == "train":
+            docs = self.train_docs
+        elif split_name == "dev":
+            docs = self.dev_docs
+        else:
+            docs = self.test_docs
+        return [d for d in docs if getattr(d, "has_typed_entities", False)]
 
     def _load_all_sidecars(self) -> Dict[str, Dict[str, List[DocEETypedEntity]]]:
         loaded = {}
@@ -440,10 +453,42 @@ class DocEEProcessor(BasicProcessor):
 
         doc.has_typed_entities = len(doc.typed_entities) > 0
         doc.typed_entity_source = "sidecar_jsonl" if doc.has_typed_entities else "none"
+    def _unwrap_json_item(self, json_item):
+        """
+        兼容几种输入格式：
+        1) [doc_id, data]
+        2) (doc_id, data)
+        3) {"doc_id": "...", "sentences": ..., ...}
+        4) {"doc_id": "...", "data": {...}}
+        5) {"some_doc_id": {...}}   # 单键 dict
+        """
+        if isinstance(json_item, (list, tuple)):
+            if len(json_item) == 2 and isinstance(json_item[1], dict):
+                return json_item[0], json_item[1]
+            raise ValueError(f"Unsupported list/tuple json_item format: {type(json_item)} / len={len(json_item)}")
+
+        if isinstance(json_item, dict):
+            if "doc_id" in json_item and "sentences" in json_item:
+                doc_id = json_item["doc_id"]
+                data = json_item
+                return doc_id, data
+
+            if "doc_id" in json_item and "data" in json_item and isinstance(json_item["data"], dict):
+                doc_id = json_item["doc_id"]
+                data = json_item["data"]
+                return doc_id, data
+
+            if len(json_item) == 1:
+                doc_id, data = next(iter(json_item.items()))
+                if isinstance(data, dict):
+                    return doc_id, data
+
+            raise ValueError(f"Unsupported dict json_item keys: {list(json_item.keys())[:10]}")
+
+        raise TypeError(f"Unsupported json_item type: {type(json_item)}")
 
     def parse_json_one(self, json_item, split_name: Optional[str] = None) -> DocEEDocumentExample:
-        doc_id: str = json_item[0]
-        data = json_item[1]
+        doc_id, data = self._unwrap_json_item(json_item)##changed
         sentences: List[str] = data["sentences"]
         ann_mspan2dranges: Dict[str, List[list]] = data["ann_mspan2dranges"]
         ann_mspan2guess_field: Dict[str, str] = data["ann_mspan2guess_field"]
@@ -489,7 +534,15 @@ class DocEEProcessor(BasicProcessor):
 
     def parse_json_all(self, json_data, split_name: Optional[str] = None) -> List[DocEEDocumentExample]:
         docs = []
-        for one in json_data:
+
+        if isinstance(json_data, dict):
+            iterable = list(json_data.items())
+        else:
+            iterable = json_data
+
+        for one in iterable:
             doc = self.parse_json_one(one, split_name=split_name)
             docs.append(doc)
+
         return docs
+
