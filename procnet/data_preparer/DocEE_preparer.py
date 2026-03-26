@@ -592,7 +592,7 @@ class DocEEPreparer(BasicPreparer):
                     "global_key": ent.get("global_key", (sent_idx, b, e, type_id)),
                     "local_key": (local_sent_idx, b, e, type_id),
                     "w2ner_key": ent.get("w2ner_key", w2ner_key),
-                    "procnet_span_key": ent.get("procnet_span_key", procnet_span_key),
+                    "procnet_span_key": procnet_span_key,
                     "mention_index": mention_idx,
 
                     # fragment and position info

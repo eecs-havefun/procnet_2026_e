@@ -237,8 +237,9 @@ class DocEEProxyNodeModel(DocEEBasicModel):
         return tuple([node['b'], node['e']])
 
     def _build_procnet_span_state(self, lm_hidden_state, node: dict, device):
-        b = int(node['b'])
-        e = int(node['e'])
+        b = int(node.get('flat_b', node['b']))
+        e = int(node.get('flat_e', node['e']))
+
         if e <= b:
             return None
         span_hidden_state = lm_hidden_state[b:e]

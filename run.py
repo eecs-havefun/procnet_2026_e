@@ -49,7 +49,13 @@ def get_config(args) -> DocEEConfig:
 def run(args):
     config = get_config(args)
     logging.info('save_name = {}'.format(config.model_save_name))
-    dee_pro = DocEEProcessor(args.read_pseudo)
+    dee_pro = DocEEProcessor(
+        read_pseudo_dataset=args.read_pseudo,
+        use_procnet_pred_entities=config.use_procnet_pred_entities,
+        dataset_dir="/home/mengfanrong/finaldesign/W2NERproject/procnet/Data",
+        typed_entities_dir="/home/mengfanrong/finaldesign/W2NERproject/procnet/tmp_sidecar",
+    )
+
     dee_pre = DocEEPreparer(config=config, processor=dee_pro)
     pre_data = dee_pre.get_loader_for_flattened_fragment_before_event()
     train_dataset, dev_dataset, test_dataset, train_loader, dev_loader, test_loader = pre_data

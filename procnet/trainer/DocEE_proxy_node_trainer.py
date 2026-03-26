@@ -138,6 +138,40 @@ class DocEETrainer(DocEEBasicSeqLabelingTrainer):
 
     def model_fn(self, model: BasicModel, batch: list, run_eval: bool, use_mix_bio: bool):
         doc_id, input_ids, input_att_masks, bio_ids, events_labels, procnet_entity_nodes = self._unpack_batch(batch)
+        doc_id_show = doc_id
+        if isinstance(doc_id_show, (list, tuple)) and len(doc_id_show) == 1:
+            doc_id_show = doc_id_show[0]
+
+        batch_len = len(batch) if isinstance(batch, (list, tuple)) else None
+
+        if procnet_entity_nodes is None:
+            logging.info(
+                "[PROCNET_DEBUG][trainer_in] doc_id=%s run_eval=%s batch_len=%s has_procnet_entity_nodes=False",
+                doc_id_show, run_eval, batch_len
+            )
+        else:
+            fragment_node_counts = []
+            first_non_empty_node = None
+            for one_fragment_nodes in procnet_entity_nodes:
+                cnt = len(one_fragment_nodes) if one_fragment_nodes is not None else -1
+                fragment_node_counts.append(cnt)
+                if first_non_empty_node is None and one_fragment_nodes:
+                    first_non_empty_node = one_fragment_nodes[0]
+
+            non_empty_fragment_num = sum(1 for x in procnet_entity_nodes if x)
+
+            logging.info(
+                "[PROCNET_DEBUG][trainer_in] doc_id=%s run_eval=%s batch_len=%s has_procnet_entity_nodes=True "
+                "fragment_num=%s non_empty_fragment_num=%s fragment_node_counts=%s first_node_keys=%s",
+                doc_id_show,
+                run_eval,
+                batch_len,
+                len(procnet_entity_nodes),
+                non_empty_fragment_num,
+                fragment_node_counts,
+                sorted(first_non_empty_node.keys()) if isinstance(first_non_empty_node, dict) else None,
+            )
+
         input_ids = input_ids.to(self.device) if isinstance(input_ids, torch.Tensor) else [x.to(self.device) for x in input_ids]
         input_att_masks = input_att_masks.to(self.device) if isinstance(input_att_masks, torch.Tensor) else None
 
@@ -166,6 +200,17 @@ class DocEETrainer(DocEEBasicSeqLabelingTrainer):
 
         model_res = model(**model_kwargs)
         loss, result = model_res
+        logging.info(
+            "[PROCNET_DEBUG][trainer_out] doc_id=%s run_eval=%s used_procnet_entity_nodes=%s "
+            "error_report=%s loss=%.6f node_num_from_batch=%s",
+            doc_id_show,
+            run_eval,
+            result.get('used_procnet_entity_nodes', None),
+            result.get('error_report', None),
+            float(loss.detach().item()) if hasattr(loss, "detach") else float(loss),
+            [len(x) for x in procnet_entity_nodes] if procnet_entity_nodes is not None else None,
+        )
+
         if isinstance(bio_ids, torch.Tensor):
             BIO_ans = bio_ids.view(-1).detach().cpu().numpy().tolist()
         else:
