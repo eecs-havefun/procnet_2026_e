@@ -5,7 +5,7 @@ from procnet.model.basic_model import BasicModel
 from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
 from procnet.data_preparer.basic_preparer import BasicPreparer
 from procnet.data_preparer.DocEE_preparer import DocEEPreparer
-from typing import Dict
+from typing import Dict, List, Optional, Tuple
 from transformers import PreTrainedModel
 from torch_geometric.nn import FiLMConv
 from procnet.conf.DocEE_conf import DocEEConfig
@@ -154,6 +154,8 @@ class DocEEProxyNodeModel(DocEEBasicModel):
         self.neg_bio_ratio_total = preparer.neg_bio_ratio_total
 
         self.preparer = preparer
+        self.use_procnet_entity_nodes = getattr(config, "use_procnet_entity_nodes", False)
+        self.num_procnet_type = max(1, len(getattr(preparer, "procnet_type_index_to_id", [-1])))
         self.num_proxy_slot = config.proxy_slot_num
         self.num_BIO_tag = len(preparer.seq_BIO_index_to_tag)
         self.num_event_type = len(preparer.event_type_type_to_index)
@@ -189,6 +191,13 @@ class DocEEProxyNodeModel(DocEEBasicModel):
             nn.GELU(),
             nn.Dropout(self.dropout_ratio),
         )
+        self.procnet_type_embedding = nn.Embedding(self.num_procnet_type, self.node_size)
+        self.procnet_span_type_fuse = nn.Sequential(
+            nn.Linear(self.node_size * 2, self.node_size),
+            nn.LayerNorm(self.node_size),
+            nn.GELU(),
+            nn.Dropout(self.dropout_ratio),
+        )
         self.edge_type_table = {edge_types[i]: i for i in range(len(edge_types))}
         self.gcn = DocEEGNNModelHN(node_size=self.node_size, num_relations=len(self.edge_type_table), dropout_ratio=self.dropout_ratio)
 
@@ -219,11 +228,36 @@ class DocEEProxyNodeModel(DocEEBasicModel):
         self.ce_normal_loss_fn = nn.CrossEntropyLoss()
         self.mse_loss_fn = nn.MSELoss()
 
+    def _get_procnet_node_key(self, node: dict, use_span_as_key: bool = True):
+        if use_span_as_key:
+            if 'procnet_span_key' in node and node['procnet_span_key'] is not None:
+                return tuple(node['procnet_span_key'])
+            if 'token_ids' in node and node['token_ids'] is not None:
+                return tuple(node['token_ids'])
+        return tuple([node['b'], node['e']])
+
+    def _build_procnet_span_state(self, lm_hidden_state, node: dict, device):
+        b = int(node['b'])
+        e = int(node['e'])
+        if e <= b:
+            return None
+        span_hidden_state = lm_hidden_state[b:e]
+        if span_hidden_state.size(0) == 0:
+            return None
+        span_state = torch.mean(span_hidden_state, dim=0, keepdim=True)
+        type_index = int(node.get('type_index', 0))
+        type_index = max(0, min(type_index, self.num_procnet_type - 1))
+        type_tensor = torch.LongTensor([type_index]).to(device)
+        type_state = self.procnet_type_embedding(type_tensor)
+        span_state = self.procnet_span_type_fuse(torch.cat([span_state, type_state], dim=1))
+        return span_state
+
     def forward(self,
                 inputs_ids,
                 inputs_att_masks,
                 events_labels=None,
                 bios_ids=None,
+                procnet_entity_nodes=None,
                 use_mix_bio: bool = True,
                 use_span_as_key: bool = True,
                 ):
@@ -233,6 +267,11 @@ class DocEEProxyNodeModel(DocEEBasicModel):
 
         # cpu [ [101, 102, 103], [102, 104, 105] ]
         input_ids_int = [x.detach().cpu().numpy().tolist() for x in inputs_ids]
+
+        has_any_procnet_entity_nodes = (
+            procnet_entity_nodes is not None and any(len(x) > 0 for x in procnet_entity_nodes)
+        )
+        use_procnet_entity_nodes = self.use_procnet_entity_nodes and has_any_procnet_entity_nodes
 
         # --- entity record init ---
         bio_probs = []
@@ -354,6 +393,7 @@ class DocEEProxyNodeModel(DocEEBasicModel):
             lm_cls = lm_clss_times[time_step]
             position = position_times[time_step]
             lm_hidden_state = lm_hidden_state_times[time_step]
+            fragment_procnet_nodes = procnet_entity_nodes[time_step] if use_procnet_entity_nodes else []
             # --- cls node ---
             current_index += 1
             new_node_vector.append(lm_cls)
@@ -377,16 +417,33 @@ class DocEEProxyNodeModel(DocEEBasicModel):
                 new_edge_type = [self.edge_type_table['C-C']] * len(new_edge_index)
                 edge_index += new_edge_index
                 edge_type += new_edge_type
-            for pos in position:
-                # cpu (101, 102, 103)
-                if use_span_as_key:
-                    span = tuple(input_id_int[pos[0]:pos[1]])
-                else:
-                    span = tuple([pos[0], pos[1]])
-                # (span_length, node_size)
-                span_hidden_state = lm_hidden_state[pos[0]:pos[1]]
-                # (1, node_size)
-                span_state = torch.mean(span_hidden_state, dim=0, keepdim=True)
+
+            span_items = []
+            if use_procnet_entity_nodes:
+                for node in fragment_procnet_nodes:
+                    span = self._get_procnet_node_key(node=node, use_span_as_key=use_span_as_key)
+                    span_state = self._build_procnet_span_state(
+                        lm_hidden_state=lm_hidden_state,
+                        node=node,
+                        device=device,
+                    )
+                    if span_state is None:
+                        continue
+                    span_items.append((span, span_state))
+            else:
+                for pos in position:
+                    # cpu (101, 102, 103)
+                    if use_span_as_key:
+                        span = tuple(input_id_int[pos[0]:pos[1]])
+                    else:
+                        span = tuple([pos[0], pos[1]])
+                    # (span_length, node_size)
+                    span_hidden_state = lm_hidden_state[pos[0]:pos[1]]
+                    # (1, node_size)
+                    span_state = torch.mean(span_hidden_state, dim=0, keepdim=True)
+                    span_items.append((span, span_state))
+
+            for span, span_state in span_items:
                 # --- span node ---
                 current_index += 1
                 new_node_vector.append(span_state)
@@ -444,6 +501,7 @@ class DocEEProxyNodeModel(DocEEBasicModel):
         BIO_pred = torch.cat(bio_probs, dim=0).view(-1, self.num_BIO_tags).detach().cpu().numpy().tolist()
         records = {'BIO_pred': BIO_pred,
                    'loss_bio': loss_bio.item(),
+                   'used_procnet_entity_nodes': use_procnet_entity_nodes,
                    }
         if len(node_span_to_indexes) == 0:
             loss = torch.FloatTensor([0]).to(device)
