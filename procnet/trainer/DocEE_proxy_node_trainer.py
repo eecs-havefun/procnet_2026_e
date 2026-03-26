@@ -1,15 +1,18 @@
 from typing import List, Callable
+import inspect
 import logging
-from procnet.trainer.basic_trainer import BasicTrainer
 import time
+
+import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from procnet.model.basic_model import BasicModel
-from procnet.data_preparer.basic_preparer import BasicPreparer
-import torch
-from procnet.metric.DocEE_metric import DocEEMetric
-from procnet.optimizer.basic_optimizer import BasicOptimizer
+
 from procnet.conf.DocEE_conf import DocEEConfig
+from procnet.data_preparer.basic_preparer import BasicPreparer
+from procnet.metric.DocEE_metric import DocEEMetric
+from procnet.model.basic_model import BasicModel
+from procnet.optimizer.basic_optimizer import BasicOptimizer
+from procnet.trainer.basic_trainer import BasicTrainer
 
 
 class DocEEBasicSeqLabelingTrainer(BasicTrainer):
@@ -120,24 +123,48 @@ class DocEETrainer(DocEEBasicSeqLabelingTrainer):
         super().__init__(config, model, optimizer, preparer, train_loader, dev_loader, test_loader)
         self.metric = metric
         self.score_fn = metric.the_score_fn
+        self.return_procnet_entity_nodes = getattr(config, 'return_procnet_entity_nodes', False)
+        self.use_procnet_entity_nodes = getattr(config, 'use_procnet_entity_nodes', False)
+        self.model_accepts_procnet_entity_nodes = 'procnet_entity_nodes' in inspect.signature(model.forward).parameters
+        self._warned_procnet_entity_nodes_ignored = False
+
+    def _unpack_batch(self, batch: list):
+        if len(batch) >= 6:
+            doc_id, input_ids, input_att_masks, bio_ids, events_labels, procnet_entity_nodes = (b for b in batch[:6])
+        else:
+            doc_id, input_ids, input_att_masks, bio_ids, events_labels = (b for b in batch)
+            procnet_entity_nodes = None
+        return doc_id, input_ids, input_att_masks, bio_ids, events_labels, procnet_entity_nodes
 
     def model_fn(self, model: BasicModel, batch: list, run_eval: bool, use_mix_bio: bool):
-        doc_id, input_ids, input_att_masks, bio_ids, events_labels = (b for b in batch)
+        doc_id, input_ids, input_att_masks, bio_ids, events_labels, procnet_entity_nodes = self._unpack_batch(batch)
         input_ids = input_ids.to(self.device) if isinstance(input_ids, torch.Tensor) else [x.to(self.device) for x in input_ids]
         input_att_masks = input_att_masks.to(self.device) if isinstance(input_att_masks, torch.Tensor) else None
-        if run_eval:
-            model_res = model(inputs_ids=input_ids,
-                              inputs_att_masks=input_att_masks,
-                              events_labels=events_labels,
-                              )
-        else:
+
+        model_kwargs = {
+            'inputs_ids': input_ids,
+            'inputs_att_masks': input_att_masks,
+            'events_labels': events_labels,
+        }
+        if not run_eval:
             bio_ids_run = bio_ids.to(self.device) if isinstance(bio_ids, torch.Tensor) else [x.to(self.device) for x in bio_ids]
-            model_res = model(inputs_ids=input_ids,
-                              inputs_att_masks=input_att_masks,
-                              events_labels=events_labels,
-                              bios_ids=bio_ids_run,
-                              use_mix_bio=use_mix_bio,
-                              )
+            model_kwargs['bios_ids'] = bio_ids_run
+            model_kwargs['use_mix_bio'] = use_mix_bio
+
+        should_try_procnet_nodes = procnet_entity_nodes is not None and (
+            self.return_procnet_entity_nodes or self.use_procnet_entity_nodes
+        )
+        if should_try_procnet_nodes:
+            if self.model_accepts_procnet_entity_nodes:
+                model_kwargs['procnet_entity_nodes'] = procnet_entity_nodes
+            elif not self._warned_procnet_entity_nodes_ignored:
+                logging.warning(
+                    'Batch already carries procnet_entity_nodes, but model.forward has no procnet_entity_nodes kwarg yet. '
+                    'Trainer will ignore them for now.'
+                )
+                self._warned_procnet_entity_nodes_ignored = True
+
+        model_res = model(**model_kwargs)
         loss, result = model_res
         if isinstance(bio_ids, torch.Tensor):
             BIO_ans = bio_ids.view(-1).detach().cpu().numpy().tolist()
@@ -150,6 +177,11 @@ class DocEETrainer(DocEEBasicSeqLabelingTrainer):
                'BIO_ans': BIO_ans,
                'event_ans': events_label,
                }
+        if procnet_entity_nodes is not None:
+            other_record.update({
+                'has_procnet_entity_nodes': True,
+                'procnet_entity_node_num': [len(x) for x in procnet_entity_nodes],
+            })
         result.update(other_record)
         return loss, [result]
 
