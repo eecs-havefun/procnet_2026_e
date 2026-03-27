@@ -43,7 +43,7 @@ class DocEEBasicSeqLabelingTrainer(BasicTrainer):
         epoch_loss = None
         error_num = 0
         with tqdm(dataloader, unit="b", position=0, leave=True) as tqdm_epoch:
-            for batch in tqdm(dataloader):
+            for batch in tqdm_epoch:
                 batch_step += 1
                 use_mix_bio = False if epoch <= 2 else True
                 loss, res = model_run_fn(self.model, batch, run_eval=False, use_mix_bio=use_mix_bio)
@@ -145,7 +145,7 @@ class DocEETrainer(DocEEBasicSeqLabelingTrainer):
         batch_len = len(batch) if isinstance(batch, (list, tuple)) else None
 
         if procnet_entity_nodes is None:
-            logging.info(
+            logging.debug(
                 "[PROCNET_DEBUG][trainer_in] doc_id=%s run_eval=%s batch_len=%s has_procnet_entity_nodes=False",
                 doc_id_show, run_eval, batch_len
             )
@@ -160,7 +160,7 @@ class DocEETrainer(DocEEBasicSeqLabelingTrainer):
 
             non_empty_fragment_num = sum(1 for x in procnet_entity_nodes if x)
 
-            logging.info(
+            logging.debug(
                 "[PROCNET_DEBUG][trainer_in] doc_id=%s run_eval=%s batch_len=%s has_procnet_entity_nodes=True "
                 "fragment_num=%s non_empty_fragment_num=%s fragment_node_counts=%s first_node_keys=%s",
                 doc_id_show,
@@ -200,16 +200,33 @@ class DocEETrainer(DocEEBasicSeqLabelingTrainer):
 
         model_res = model(**model_kwargs)
         loss, result = model_res
-        logging.info(
+
+        node_num_from_batch = [len(x) for x in procnet_entity_nodes] if procnet_entity_nodes is not None else None
+        used_procnet_entity_nodes = result.get('used_procnet_entity_nodes', None)
+        error_report = result.get('error_report', None)
+
+        logging.debug(
             "[PROCNET_DEBUG][trainer_out] doc_id=%s run_eval=%s used_procnet_entity_nodes=%s "
             "error_report=%s loss=%.6f node_num_from_batch=%s",
             doc_id_show,
             run_eval,
-            result.get('used_procnet_entity_nodes', None),
-            result.get('error_report', None),
+            used_procnet_entity_nodes,
+            error_report,
             float(loss.detach().item()) if hasattr(loss, "detach") else float(loss),
-            [len(x) for x in procnet_entity_nodes] if procnet_entity_nodes is not None else None,
+            node_num_from_batch,
         )
+
+        if used_procnet_entity_nodes or (error_report not in [None, '']):
+            logging.info(
+                "[PROCNET_HIT] doc_id=%s run_eval=%s used_procnet_entity_nodes=%s "
+                "error_report=%s loss=%.6f node_num_from_batch=%s",
+                doc_id_show,
+                run_eval,
+                used_procnet_entity_nodes,
+                error_report,
+                float(loss.detach().item()) if hasattr(loss, "detach") else float(loss),
+                node_num_from_batch,
+            )
 
         if isinstance(bio_ids, torch.Tensor):
             BIO_ans = bio_ids.view(-1).detach().cpu().numpy().tolist()
