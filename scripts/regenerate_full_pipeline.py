@@ -1,3 +1,8 @@
+
+# Import path configuration
+script_dir = Path(__file__).parent
+project_root = script_dir.parent.parent
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -17,11 +22,11 @@ from collections import defaultdict
 from typing import Dict, List, Any, Tuple
 
 # ========== 配置 ==========
-DATA_V1B_ROOT = Path("/home/mengfanrong/finaldesign/W2NERproject/data_v1b")
-PROCNET_OUTPUT_ROOT = Path("/home/mengfanrong/finaldesign/W2NERproject/procnet/procnet_format")
-W2NER_OUTPUT_ROOT = Path("/home/mengfanrong/finaldesign/W2NERproject/W2NER/data/data_w2ner_folded_with_dev")
-W2NER_FOLDED_OUTPUT = Path("/home/mengfanrong/finaldesign/W2NERproject/data_w2ner_folded")
-W2NER_ALT_OUTPUT = Path("/home/mengfanrong/finaldesign/W2NERproject/data_w2ner")
+DATA_V1B_ROOT = project_root / "data_v1b"
+PROCNET_OUTPUT_ROOT = project_root / "procnet" / "procnet_format"
+W2NER_OUTPUT_ROOT = project_root / "W2NER" / "data" / "data_w2ner_folded_with_dev"
+W2NER_FOLDED_OUTPUT = project_root / "data_w2ner_folded"
+W2NER_ALT_OUTPUT = project_root / "data_w2ner"
 
 DATASETS = [
     "flight_orders_with_queries",

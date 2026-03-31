@@ -1,3 +1,8 @@
+
+# Import path configuration
+script_dir = Path(__file__).parent
+project_root = script_dir.parent.parent
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -9,9 +14,9 @@ import json
 from pathlib import Path
 from collections import defaultdict
 
-DATA_V1B = Path("/home/mengfanrong/finaldesign/W2NERproject/data_v1b")
-PROCNET_FORMAT = Path("/home/mengfanrong/finaldesign/W2NERproject/procnet/procnet_format")
-W2NER_FORMAT = Path("/home/mengfanrong/finaldesign/W2NERproject/W2NER/data/data_w2ner_folded_with_dev")
+DATA_V1B = project_root / "data_v1b"
+PROCNET_FORMAT = project_root / "procnet" / "procnet_format"
+W2NER_FORMAT = project_root / "W2NER" / "data" / "data_w2ner_folded_with_dev"
 
 DATASETS = [
     "flight_orders_with_queries",

@@ -1,3 +1,8 @@
+
+# Import path configuration
+script_dir = Path(__file__).parent
+project_root = script_dir.parent.parent
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -14,10 +19,10 @@ from pathlib import Path
 
 # 数据目录
 DATA_LOCATIONS = {
-    "data_w2ner_folded": Path("/home/mengfanrong/finaldesign/W2NERproject/data_w2ner_folded"),
-    "data_w2ner": Path("/home/mengfanrong/finaldesign/W2NERproject/data_w2ner"),
-    "W2NER/data/data_w2ner_folded_with_dev": Path("/home/mengfanrong/finaldesign/W2NERproject/W2NER/data/data_w2ner_folded_with_dev"),
-    "W2NER/data/w2ner_format": Path("/home/mengfanrong/finaldesign/W2NERproject/W2NER/data/w2ner_format"),
+    "data_w2ner_folded": project_root / "data_w2ner_folded",
+    "data_w2ner": project_root / "data_w2ner",
+    "W2NER/data/data_w2ner_folded_with_dev": project_root / "W2NER" / "data" / "data_w2ner_folded_with_dev",
+    "W2NER/data/w2ner_format": project_root / "W2NER" / "data" / "w2ner_format",
 }
 
 DATASETS = [
