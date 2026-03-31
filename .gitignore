@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyTorch
+*.pt
+*.pth
+*.bin
+*.ckpt
+checkpoint/
+*.onnx
+
+# Logs
+logs/
+*.log
+
+# Results and outputs
+Result/
+run_output/
+outputs/
+
+# Cache
+Cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+venv/
+env/
+
+# Large data directories (keep only essential ones)
+# data_v1b/, Data_v1b/, procnet_format/, sidecar_entities/, sidecar_entities_gold/ are tracked
+
+# Temporary files
+*.tmp
+tmp_*.py
+tmp_*.json
+tmp_*.jsonl
+
+# Verification scripts (not part of main pipeline)
+verify_*.py
+check_*.py
+debug_*.py
+run_1epoch_test.py
+run_w2ner_sidecar_inference.py
+run_w2ner_sidecar_inference.sh
+tmp_check_docee_example.py
+tmp_test_doc_typed_entities.jsonl
+convert_docee_to_w2ner.py

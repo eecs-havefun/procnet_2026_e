@@ -119,7 +119,7 @@ def parse_args(in_args=None):
     arg_parser.add_argument(
         "--model_name",
         type=str,
-        default="hfl/chinese-roberta-wwm-ext",
+        default="/home/mengfanrong/finaldesign/W2NERproject/models/chinese-roberta-wwm-ext",
         help="Backbone model name or local model path"
     )
     arg_parser.add_argument(

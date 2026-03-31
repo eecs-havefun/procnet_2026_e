@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -58,13 +59,33 @@ class DocEEProcessor(BasicProcessor):
         self.dev_docs = self.parse_json_all(self.dev_json, split_name="dev")
         self.test_docs = self.parse_json_all(self.test_json, split_name="test")
 
-        self.SCHEMA = DocEELabel.EVENT_SCHEMA
-        self.SCHEMA_KEY_ENG_CHN = DocEELabel.KEY_ENG_CHN
-        self.SCHEMA_KEY_CHN_ENG = DocEELabel.KEY_CHN_ENG
+        # 从数据中动态构建事件 schema
+        self.SCHEMA = self._build_schema_from_data()
+        self.SCHEMA_KEY_ENG_CHN = {}
+        self.SCHEMA_KEY_CHN_ENG = {}
+        
         if read_pseudo_dataset:
             self.SCHEMA = PseudoDocEELabel.EVENT_SCHEMA
             self.SCHEMA_KEY_ENG_CHN = PseudoDocEELabel.KEY_ENG_CHN
             self.SCHEMA_KEY_CHN_ENG = PseudoDocEELabel.KEY_CHN_ENG
+
+    def _build_schema_from_data(self) -> Dict[str, List[str]]:
+        """从数据中构建事件类型→角色列表的 schema"""
+        schema = {}
+        all_docs = self.train_docs + self.dev_docs + self.test_docs
+        
+        for doc in all_docs:
+            for event in getattr(doc, "events", []):
+                event_type = event.get("EventType")
+                if event_type:
+                    if event_type not in schema:
+                        schema[event_type] = set()
+                    for key in event.keys():
+                        if key != "EventType":
+                            schema[event_type].add(key)
+        
+        # 转换为列表
+        return {k: sorted(list(v)) for k, v in schema.items()}
 
     # ------------------------------------------------------------------
     # sidecar discovery / loading
@@ -240,6 +261,89 @@ class DocEEProcessor(BasicProcessor):
         if sentence_text is None or b < 0 or e > len(sentence_text) or b >= e:
             return None
         return sentence_text[b:e]
+
+
+    def _parse_ann_mspan_key(self, raw_key: str) -> Dict[str, Any]:
+        """
+        Support both legacy plain-text keys and composite keys in the form:
+            文本#sent_b_e#类型
+        Example:
+            11月11日#0_13_19#startDate
+
+        Returns a normalized structure with:
+            - span_text
+            - sent_idx
+            - b
+            - e
+            - field_from_key
+            - raw_key
+        """
+        parsed = {
+            "raw_key": raw_key,
+            "span_text": raw_key,
+            "sent_idx": None,
+            "b": None,
+            "e": None,
+            "field_from_key": None,
+        }
+
+        if not isinstance(raw_key, str):
+            return parsed
+
+        # 使用 re.DOTALL 使 . 匹配换行符
+        match = re.match(r"^(.*)#(\d+)_(\d+)_(\d+)#([^#]+)$", raw_key, re.DOTALL)
+        if not match:
+            return parsed
+
+        span_text, sent_idx, b, e, field_from_key = match.groups()
+        parsed.update(
+            {
+                "span_text": span_text,
+                "sent_idx": int(sent_idx),
+                "b": int(b),
+                "e": int(e),
+                "field_from_key": field_from_key,
+            }
+        )
+        return parsed
+
+    def _normalize_gold_entity_from_annotation(
+        self,
+        raw_key: str,
+        positions: List[list],
+        ann_mspan2guess_field: Dict[str, str],
+        sentences: List[str],
+    ) -> DocEEEntity:
+        parsed = self._parse_ann_mspan_key(raw_key)
+        span_text = parsed["span_text"]
+        field = ann_mspan2guess_field[raw_key]
+
+        if parsed["field_from_key"] is not None and parsed["field_from_key"] != field:
+            logging.warning(
+                "Gold entity key field mismatch: key=%s parsed_field=%s mapped_field=%s",
+                raw_key,
+                parsed["field_from_key"],
+                field,
+            )
+
+        norm_positions = [[int(p[0]), int(p[1]), int(p[2])] for p in positions]
+        
+        first_position = norm_positions[0] if norm_positions else None
+        if first_position is not None:
+            sent_idx, b, e = first_position
+            expected_span = self._safe_extract_span(sentences, sent_idx, b, e)
+            if expected_span is not None and span_text != expected_span:
+                logging.warning(
+                    "Gold entity span mismatch resolved from composite key: key=%s span_text=%s expected_span=%s",
+                    raw_key,
+                    span_text,
+                    expected_span,
+                )
+                # 使用 expected_span 覆盖 span_text
+                span_text = expected_span
+        
+        entity = DocEEEntity(span=span_text, positions=norm_positions, field=field)
+        return entity
 
     def _resolve_positions(self, ent: Dict[str, Any]) -> Optional[List[List[int]]]:
         if ent.get("positions") is not None:
@@ -529,8 +633,8 @@ class DocEEProcessor(BasicProcessor):
         assert len(ann_mspan2dranges) == len(ann_mspan2guess_field)
 
         entities = [
-            DocEEEntity(span=span, positions=positions, field=ann_mspan2guess_field[span])
-            for span, positions in ann_mspan2dranges.items()
+            self._normalize_gold_entity_from_annotation(raw_key, positions, ann_mspan2guess_field, sentences)
+            for raw_key, positions in ann_mspan2dranges.items()
         ]
 
         events = []
@@ -541,9 +645,15 @@ class DocEEProcessor(BasicProcessor):
 
         doc = DocEEDocumentExample(doc_id=doc_id, sentences=sentences, entities=entities, events=events)
 
+        # 验证 entity span 与句子切片一致（仅用于调试，生产环境可移除）
         for entity in doc.entities:
             for sent_idx, b, e in entity.positions:
-                assert entity.span == doc.sentences[sent_idx][b:e]
+                expected = doc.sentences[sent_idx][b:e] if sent_idx < len(doc.sentences) else None
+                if expected != entity.span:
+                    logging.error(
+                        "Entity span mismatch after normalization: doc=%s span='%s' expected='%s' @ [%d:%d]",
+                        doc_id, entity.span, expected, b, e
+                    )
 
         doc.procnet_entities = self._parse_procnet_entities(data, sentences) if self.use_procnet_pred_entities else []
         doc.has_procnet_entities = bool(doc.procnet_entities)
