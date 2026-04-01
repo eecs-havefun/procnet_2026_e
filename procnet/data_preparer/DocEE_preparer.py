@@ -121,6 +121,10 @@ class DocEEPreparer(BasicPreparer):
             new_k = self.event_type_type_to_index[k]
             self.event_schema_index[new_k] = new_v
 
+        self.train_docs = self.all_docs[0]
+        self.dev_docs = self.all_docs[1]
+        self.test_docs = self.all_docs[2]
+
         # ----------------------------
         # procnet typed-entity vocab
         # ----------------------------
@@ -129,10 +133,6 @@ class DocEEPreparer(BasicPreparer):
         self.procnet_type_id_to_index = {
             type_id: idx for idx, type_id in enumerate(self.procnet_type_index_to_id)
         }
-
-        self.train_docs = self.all_docs[0]
-        self.dev_docs = self.all_docs[1]
-        self.test_docs = self.all_docs[2]
 
         self._log_procnet_sidecar_coverage()
 
