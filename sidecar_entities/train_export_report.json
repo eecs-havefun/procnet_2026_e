@@ -1,0 +1,96 @@
+{
+  "num_source_sentences": 10261,
+  "num_pred_sentences": 2165,
+  "num_docs": 3360,
+  "num_missing_pred_sentences": 10261,
+  "num_sentence_mismatches": 0,
+  "num_duplicate_pred_sentence_keys": 0,
+  "num_duplicate_entity_keys": 0,
+  "num_validation_errors": 0,
+  "sample_missing_pred": [
+    {
+      "doc_id": "doc_000003",
+      "sent_id": 0
+    },
+    {
+      "doc_id": "doc_000003",
+      "sent_id": 1
+    },
+    {
+      "doc_id": "doc_000003",
+      "sent_id": 2
+    },
+    {
+      "doc_id": "doc_000003",
+      "sent_id": 3
+    },
+    {
+      "doc_id": "doc_000004",
+      "sent_id": 0
+    },
+    {
+      "doc_id": "doc_000004",
+      "sent_id": 1
+    },
+    {
+      "doc_id": "doc_000006",
+      "sent_id": 0
+    },
+    {
+      "doc_id": "doc_000006",
+      "sent_id": 1
+    },
+    {
+      "doc_id": "doc_000006",
+      "sent_id": 2
+    },
+    {
+      "doc_id": "doc_000006",
+      "sent_id": 3
+    },
+    {
+      "doc_id": "doc_000009",
+      "sent_id": 0
+    },
+    {
+      "doc_id": "doc_000010",
+      "sent_id": 0
+    },
+    {
+      "doc_id": "doc_000010",
+      "sent_id": 1
+    },
+    {
+      "doc_id": "doc_000010",
+      "sent_id": 2
+    },
+    {
+      "doc_id": "doc_000010",
+      "sent_id": 3
+    },
+    {
+      "doc_id": "doc_000011",
+      "sent_id": 0
+    },
+    {
+      "doc_id": "doc_000011",
+      "sent_id": 1
+    },
+    {
+      "doc_id": "doc_000011",
+      "sent_id": 2
+    },
+    {
+      "doc_id": "doc_000011",
+      "sent_id": 3
+    },
+    {
+      "doc_id": "doc_000012",
+      "sent_id": 0
+    }
+  ],
+  "sample_sentence_mismatches": [],
+  "sample_duplicate_pred_sentence_keys": [],
+  "sample_duplicate_entity_keys": [],
+  "sample_validation_errors": []
+}
