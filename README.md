@@ -475,6 +475,30 @@ python scripts/export_doc_typed_entities.py \
 
 **输出**：每行一个文档的 JSONL 文件，格式为 `{"doc_id": "...", "typed_entities": [...]}`。
 
+#### 脚本 4：`generate_predictions.py`
+
+加载已有 checkpoint，生成 dev/test 集的逐文档预测并保存。
+
+```bash
+python generate_predictions.py \
+  --checkpoint Checkpoint/w2ner_sidecar_exp1/w2ner_sidecar_exp1_010.pth \
+  --run_save_name w2ner_sidecar_exp1
+```
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--checkpoint` | 模型 checkpoint 路径（必填） | — |
+| `--run_save_name` | 实验名称（必填，用于输出路径） | — |
+| `--dataset_dir` | 数据集目录 | `procnet_format/mixed_data_with_queries` |
+| `--sidecar_dir` | Sidecar 实体目录 | `sidecar_entities` |
+| `--model_path` | 预训练模型路径 | `../models/chinese-roberta-wwm-ext` |
+
+**输出**：`Result/{run_save_name}/{run_save_name}_predictions.json`，包含：
+- `best_epoch` — 最佳 epoch 编号
+- `best_dev_f1` — 最佳 dev Event F1
+- `dev_predictions` — dev 集逐文档预测
+- `test_predictions` — test 集逐文档预测
+
 ---
 
 ## EPAL 集成规划
@@ -548,6 +572,7 @@ procnet/
 ├── run.sh                              # 快捷训练脚本（GPU 0, batch=32, epoch=100）
 ├── run_1epoch_test.py                  # 冒烟测试（验证 sidecar 加载链路）
 ├── verify_procnet_trainer_one_sample.py # 单样本验证（调试 forward pass）
+├── generate_predictions.py             # 从 checkpoint 生成预测结果
 │
 ├── procnet/                            # 核心库
 │   ├── conf/

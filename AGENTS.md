@@ -25,6 +25,7 @@ ProcNet is a document-level multi-event extraction system using event proxy node
 | Custom training | `CUDA_VISIBLE_DEVICES=0 python run.py --run_save_name=<name> --batch_size=32 --epoch=100` |
 | Smoke test | `python run_1epoch_test.py` |
 | Single-sample verify | `python verify_procnet_trainer_one_sample.py` |
+| Generate predictions | `python generate_predictions.py --checkpoint Checkpoint/<name>/<name>_XXX.pth --run_save_name=<name>` |
 | Data: RASA → ProcNet | `python scripts/convert_data_v1b_to_procnet.py --input_dir ... --output_dir ...` |
 | Data: ProcNet → W2NER | `python scripts/convert_procnet_to_w2ner.py --input_dir ... --output_dir ...` |
 | Data: W2NER pred → sidecar | `python scripts/export_doc_typed_entities.py --source_json ... --pred_json ...` |
@@ -295,6 +296,7 @@ procnet/
 ├── run.sh                              # Quick training wrapper (GPU 0, batch=32, epoch=100)
 ├── run_1epoch_test.py                  # Smoke test: validates full sidecar→training pipeline
 ├── verify_procnet_trainer_one_sample.py # Single-sample forward pass verification
+├── generate_predictions.py              # Generate predictions from checkpoint
 │
 ├── procnet/                            # Core library
 │   ├── conf/
