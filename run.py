@@ -135,6 +135,12 @@ def parse_args(in_args=None):
         default="true",
         help="Whether dataloader shuffles training data"
     )
+    arg_parser.add_argument(
+        "--save_top_k",
+        type=int,
+        default=1,
+        help="Save top-k checkpoints by dev F1 (default: 1, set to -1 to save all)"
+    )
 
     args = arg_parser.parse_args(args=in_args)
 
@@ -170,6 +176,7 @@ def get_config(args) -> DocEEConfig:
     config.max_epochs = args.epoch
     config.data_loader_shuffle = args.data_loader_shuffle
     config.model_name = args.model_name
+    config.save_top_k = args.save_top_k
 
     if args.device == "cuda" and torch.cuda.is_available():
         config.device = torch.device("cuda")

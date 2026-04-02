@@ -12,3 +12,4 @@ class DocEEConfig(BasicConfig):
 
         self.return_procnet_entity_nodes = getattr(self, "return_procnet_entity_nodes", False)
         self.use_procnet_entity_nodes = getattr(self, "use_procnet_entity_nodes", False)
+        self.save_top_k = getattr(self, "save_top_k", None) or 1

@@ -90,12 +90,14 @@ class DocEEBasicSeqLabelingTrainer(BasicTrainer):
         train_loader = self.train_loader if train_loader is None else train_loader
         dev_loader = self.dev_loader if dev_loader is None else dev_loader
         test_loader = self.test_loader if test_loader is None else test_loader
+        save_top_k = getattr(self.config, "save_top_k", 1)
+        save_all = save_top_k < 0
+        top_k_list = []
+        best_dev_f1 = -1.0
+        best_epoch_raw = {"dev": None, "test": None, "epoch": None}
         for epoch in range(1, self.config.max_epochs + 1):
             epoch_formatted = self.epoch_format(epoch, 3)
             self.train_batch_template(model_run_fn, dataloader=train_loader, epoch=epoch)
-            # save model checkpoint
-            model_save_path = self.model_save_folder_path / (self.config.model_save_name + '_' + epoch_formatted + '.pth')
-            self.optimizer.save_model(model_save_path)
             logging.info('Eval Epoch = {}, dev:'.format(epoch))
             dev_score_results, dev_raw_results = self.eval_batch_template(model_run_fn, score_fn=score_fn, dataloader=dev_loader, epoch=epoch)
             logging.info('Eval Epoch = {}, test:'.format(epoch))
@@ -106,6 +108,40 @@ class DocEEBasicSeqLabelingTrainer(BasicTrainer):
                                    }
             score_results_file_name = self.config.model_save_name + '_' + epoch_formatted + '.json'
             self.write_json_file(self.result_folder_path / score_results_file_name, final_score_results)
+
+            dev_f1 = dev_score_results.get("event", {}).get("all_event", {}).get("micro_f1", 0)
+            if dev_f1 > best_dev_f1:
+                best_dev_f1 = dev_f1
+                best_epoch_raw = {"dev": dev_raw_results, "test": test_raw_results, "epoch": epoch}
+                logging.info('New best dev F1 = %.4f at epoch %d', best_dev_f1, epoch)
+
+            if save_all:
+                model_save_path = self.model_save_folder_path / (self.config.model_save_name + '_' + epoch_formatted + '.pth')
+                self.optimizer.save_model(model_save_path)
+            else:
+                top_k_list.append((dev_f1, epoch, epoch_formatted))
+                top_k_list.sort(key=lambda x: x[0], reverse=True)
+                if len(top_k_list) > save_top_k:
+                    removed = top_k_list.pop()
+                    removed_path = self.model_save_folder_path / (self.config.model_save_name + '_' + removed[2] + '.pth')
+                    if removed_path.exists():
+                        removed_path.unlink()
+                        logging.info('Removed checkpoint for epoch %d (F1=%.4f, outside top-%d)', removed[1], removed[0], save_top_k)
+                for _, ep, ep_fmt in top_k_list:
+                    ckpt_path = self.model_save_folder_path / (self.config.model_save_name + '_' + ep_fmt + '.pth')
+                    if not ckpt_path.exists():
+                        self.optimizer.save_model(ckpt_path)
+                        logging.info('Saved checkpoint for epoch %d (F1=%.4f)', ep, dev_f1 if ep == epoch else 0)
+
+        pred_file_name = self.config.model_save_name + '_predictions.json'
+        pred_data = {
+            "best_epoch": best_epoch_raw["epoch"],
+            "best_dev_f1": best_dev_f1,
+            "dev_predictions": best_epoch_raw["dev"],
+            "test_predictions": best_epoch_raw["test"],
+        }
+        self.write_json_file(self.result_folder_path / pred_file_name, pred_data)
+        logging.info('Saved best-epoch predictions to %s', pred_file_name)
 
 
 class DocEETrainer(DocEEBasicSeqLabelingTrainer):

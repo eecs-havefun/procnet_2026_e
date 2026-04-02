@@ -7,6 +7,8 @@
 > ProcNet 使用事件代理节点（Event Proxy Nodes）和 Hausdorff 距离最小化，实现文档级多事件抽取。通过代理节点建立事件间的全局依赖关系，直接最小化预测事件集合与真实事件集合之间的 Hausdorff 距离。
 >
 > 本扩展引入 W2NER 预测的实体作为 sidecar 输入，替代 gold 实体标注，实现 W2NER → ProcNet 级联事件抽取。
+>
+> 未来计划引入 EPAL 的角色索引槽位填充机制，解决跨事件实体复用和同事件多角色冲突问题。
 
 ---
 
@@ -18,6 +20,8 @@
 - [快速开始](#快速开始)
 - [训练命令](#训练命令)
 - [W2NER 耦合](#w2ner-耦合)
+- [EPAL 集成规划](#epal-集成规划)
+- [脚本参考](#脚本参考)
 - [项目结构](#项目结构)
 - [已知问题](#已知问题)
 - [引用](#引用)
@@ -93,8 +97,9 @@ sidecar_entities_gold/                    sidecar_entities/
 │                   DocEETrainer                          │
 │                                                         │
 │  • 训练循环 + 梯度累积                                  │
+│  • Top-K checkpoint 保存（按 dev F1）                   │
 │  • 评估 + DocEEMetric                                   │
-│  • 结果保存到 Result/                                   │
+│  • 最佳 epoch 预测输出 → {name}_predictions.json        │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -105,6 +110,8 @@ sidecar_entities_gold/                    sidecar_entities/
 | **复合 key** | `文本#sentIdx_start_end#类型`，区分同文本多位置/多类型 |
 | **索引口径** | 字级、左闭右开 `[start, end)`，与 W2NER 一致 |
 | **Sidecar 机制** | JSONL 格式存储预提取实体，按 `doc_id` 匹配加载 |
+| **Checkpoint 策略** | 按 dev F1 保留 Top-K，自动清理低分 checkpoint |
+| **预测输出** | 训练结束后自动保存最佳 epoch 的逐文档预测 |
 | **两种实验模式** | Gold sidecar（上限）vs W2NER sidecar（级联） |
 
 ---
@@ -202,6 +209,7 @@ python run.py \
 | `--model_name` | 骨干模型路径 | `../models/chinese-roberta-wwm-ext` |
 | `--device` | 训练设备 | `cuda` |
 | `--data_loader_shuffle` | 是否打乱训练数据 | `true` |
+| `--save_top_k` | 保留 Top-K 个最佳 checkpoint（-1=全部） | `1` |
 
 ### 实验模式
 
@@ -250,11 +258,20 @@ python run.py \
 ```
 Result/
 └── {run_save_name}/
-    ├── {run_save_name}_001.json
+    ├── {run_save_name}_001.json          # 每 epoch 聚合指标
     ├── {run_save_name}_002.json
     ...
-    └── {run_save_name}_{epoch}.json
+    ├── {run_save_name}_{epoch}.json
+    └── {run_save_name}_predictions.json  # 最佳 epoch 逐文档预测
 ```
+
+每个 epoch JSON 包含 dev/test 的 BIO 指标和事件抽取指标（Event F1/P/R、各事件类型 F1）。
+
+`{run_save_name}_predictions.json` 包含：
+- `best_epoch` — 最佳 epoch 编号
+- `best_dev_f1` — 最佳 dev Event F1
+- `dev_predictions` — dev 集逐文档预测（doc_id, BIO_ans, event_ans 等）
+- `test_predictions` — test 集逐文档预测
 
 ---
 
@@ -460,37 +477,130 @@ python scripts/export_doc_typed_entities.py \
 
 ---
 
+## EPAL 集成规划
+
+### 背景
+
+[EPAL](https://arxiv.org/abs/2501.00000)（Hu et al., 2025）提出了一种文档级多事件抽取方法，核心贡献包括：
+
+1. **事件特定探针（Event-specific Probe）** — 为每个候选实体初始化探针，作为事件实例检测器
+2. **事件特定参数库（Event-specific Argument Library）** — 在每个事件视图下重建候选参数表示
+3. **角色索引槽位填充（Role-indexed Slot Filling）** — 对每个角色，从候选参数中选择最优填充
+
+### 当前瓶颈
+
+W2NER → ProcNet 级联已打通，但存在两个结构性问题：
+
+| 问题 | 原因 |
+|------|------|
+| **跨事件实体复用** | 同一实体出现在多个事件中，ProcNet 可能合并或混淆这些事件 |
+| **同事件多角色冲突** | 同一实体在同一事件中应填充多个角色，但 ProcNet 的实体索引分类倾向于将实体推向单一角色 |
+
+### EPAL 的解决方案
+
+EPAL 的**角色索引槽位填充**机制天然解决上述问题：
+
+- **当前 ProcNet**：实体索引 — 对每个实体，分类到一个角色/null
+- **EPAL 方式**：角色索引 — 对每个角色，从候选参数中选择一个
+
+```
+当前:  实体 → [角色A / 角色B / 角色C / null]  (每个实体只能选一个)
+EPAL:  角色A → [实体1 / 实体2 / 实体3 / CLS]  (每个角色独立选择)
+       角色B → [实体1 / 实体2 / 实体3 / CLS]  (同一实体可被多个角色选中)
+```
+
+### 三阶段集成路线
+
+#### Stage 1: EPAL-lite（最小改动）
+
+- 保留 ProcNet 代理节点作为事件假设
+- 为每个代理节点构建事件特定参数库
+- 将事件解码替换为角色索引槽位填充
+- 每个事件添加虚拟 CLS 候选表示缺失角色
+
+**预期收益**：立即支持同事件多角色复用，更清晰的槽位式事件表
+
+#### Stage 2: 事件条件参数对比
+
+- 计算事件条件下的参数表示
+- 添加角色对比损失（role contrastive loss）
+
+**预期收益**：减少同质事件间的混淆，提升多事件召回率
+
+#### Stage 3: 对齐感知的代理优化
+
+- 添加代理到事件的对齐机制
+- 从高置信度实体初始化部分代理假设
+
+**预期收益**：减少事件坍缩，多事件文档训练更稳定
+
+### 参考
+
+详细分析见 `epal_procnet_report_and_dialogue_summary.md`。
+
+---
+
 ## 项目结构
 
 ```
 procnet/
-├── run.py                    # 入口，参数解析 + 训练流程编排
-├── run.sh                    # 快捷训练脚本
-├── run_1epoch_test.py        # 冒烟测试
-├── procnet/                  # 核心库
-│   ├── conf/                 # 配置类（BasicConfig, DocEEConfig）
-│   ├── data_processor/       # 数据处理器（DocEE_processor）
-│   ├── data_preparer/        # 数据准备器（DocEE_preparer）
-│   ├── model/                # 模型（DocEE_proxy_node_model）
-│   ├── trainer/              # 训练器（DocEE_proxy_node_trainer）
-│   ├── metric/               # 评估指标（DocEE_metric）
-│   ├── optimizer/            # 优化器
-│   ├── dee/                  # Doc2EDAG 指标代码
-│   ├── utils/                # 工具函数
-│   └── data_example/         # 数据示例类
-├── scripts/                  # 数据转换脚本
-│   ├── convert_data_v1b_to_procnet.py
-│   ├── convert_procnet_to_w2ner.py
-│   └── export_doc_typed_entities.py
-├── data_v1b/                 # 源数据（RASA NLU 格式）
-├── procnet_format/           # 转换后的 ProcNet 格式
-├── sidecar_entities_gold/    # Gold sidecar（上限实验）
-├── sidecar_entities/         # W2NER 预测 sidecar（级联实验）
-├── conversation_summaries/   # 对话记录
-├── figures/                  # 架构图
+├── run.py                              # 主入口，参数解析 + 训练流程编排
+├── run.sh                              # 快捷训练脚本（GPU 0, batch=32, epoch=100）
+├── run_1epoch_test.py                  # 冒烟测试（验证 sidecar 加载链路）
+├── verify_procnet_trainer_one_sample.py # 单样本验证（调试 forward pass）
+│
+├── procnet/                            # 核心库
+│   ├── conf/
+│   │   ├── basic_conf.py               # BasicConfig（学习率、epoch、device 等）
+│   │   ├── DocEE_conf.py               # DocEEConfig（proxy_slot_num, node_size, save_top_k 等）
+│   │   └── global_config_manager.py    # 全局路径配置
+│   ├── data_example/
+│   │   ├── DocEEexample.py             # DocEEDocumentExample, DocEEEntity, DocEETypedEntity
+│   │   └── DuEEfin_example.py
+│   ├── data_processor/
+│   │   ├── DocEE_processor.py          # 解析 JSON + 加载 sidecar + 复合 key 解析
+│   │   └── DuEE_fin_processor.py
+│   ├── data_preparer/
+│   │   ├── DocEE_preparer.py           # Tokenize + BIO + fragment 切分 + DataLoader
+│   │   └── DuEE_fin_preparer.py
+│   ├── model/
+│   │   ├── DocEE_proxy_node_model.py   # BERT + BIO + GCN + Hausdorff 损失
+│   │   └── basic_model.py
+│   ├── trainer/
+│   │   ├── DocEE_proxy_node_trainer.py # 训练循环 + Top-K checkpoint + 预测输出
+│   │   └── basic_trainer.py
+│   ├── metric/
+│   │   ├── DocEE_metric.py             # BIO 评分 + 事件表格填充指标
+│   │   └── basic_metric.py
+│   ├── optimizer/
+│   │   └── basic_optimizer.py          # 优化器封装（梯度累积 + 模型保存）
+│   ├── dee/                            # Doc2EDAG 指标代码
+│   ├── utils/                          # 工具函数（UtilData, UtilString, UtilStructure）
+│   └── data_example/                   # 数据示例类
+│
+├── scripts/                            # 数据转换与验证脚本
+│   ├── data_paths.py                   # 集中路径配置
+│   ├── convert_data_v1b_to_procnet.py  # RASA NLU → ProcNet 格式
+│   ├── convert_procnet_to_w2ner.py     # ProcNet → W2NER 句子级格式
+│   ├── export_doc_typed_entities.py    # W2NER 预测 → 文档级 sidecar JSONL
+│   ├── check_data_loss.py              # 数据流水线损失检查
+│   ├── check_data_pipeline_alignment.py # 数据一致性 MD5 校验
+│   ├── check_full_pipeline_alignment.py # 全流水线对齐检查
+│   ├── full_data_pipeline_check.py     # 完整流水线检查
+│   ├── check_data_v1b_procnet.py       # 源数据验证
+│   └── compare_with_original_v1b.py    # 原始数据对比
+│
+├── data_v1b/                           # 源数据（RASA NLU 格式）
+├── procnet_format/                     # 转换后的 ProcNet 格式（train/dev/test）
+├── sidecar_entities_gold/              # Gold sidecar（上限实验）
+├── sidecar_entities/                   # W2NER 预测 sidecar（级联实验）
+├── conversation_summaries/             # 对话记录
+├── figures/                            # 架构图
+├── Checkpoint/                         # 模型 checkpoint（按 run_save_name 分组）
+├── Result/                             # 训练结果（每 epoch JSON + 最佳预测）
 ├── requirements.txt
-├── AGENTS.md                 # AI 代理开发指南
-└── README.md                 # 本文件
+├── AGENTS.md                           # AI 代理开发指南
+└── README.md                           # 本文件
 ```
 
 ---
@@ -500,9 +610,11 @@ procnet/
 | 问题 | 状态 | 说明 |
 |------|------|------|
 | `date`/`time` 语义分裂 | ✅ 已修复 | W2NER 已直接输出 startdate/enddate/starttime/endtime |
-| W2NER 全量预测覆盖不足 | ⚠️ 待解决 | 仅 720/4,800 篇有预测结果 |
-| 同文本多类型覆盖 | 🟡 低风险 | 复合 key 设计已解决存储层冲突 |
+| W2NER 全量预测覆盖不足 | ✅ 已解决 | 全量 4,800 篇已完成预测（Entity F1 ≈ 95%） |
+| 同文本多类型覆盖 | ✅ 已解决 | 复合 key 设计已解决存储层冲突 |
 | `event_dict` 初始化顺序 | ✅ 已修复 | `_collect_procnet_type_ids()` 移到文档赋值之后 |
+| 跨事件实体复用 | ⚠️ 待解决 | 计划通过 EPAL 角色索引槽位填充解决 |
+| 同事件多角色冲突 | ⚠️ 待解决 | 计划通过 EPAL 角色索引槽位填充解决 |
 | Event relation 实际匹配率 | 🟡 待验证 | 理论上成立，建议加运行时日志验证 |
 
 ---
