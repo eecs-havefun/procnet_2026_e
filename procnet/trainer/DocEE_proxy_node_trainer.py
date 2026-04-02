@@ -27,8 +27,7 @@ class DocEEBasicSeqLabelingTrainer(BasicTrainer):
                  ):
         super().__init__(config, model, optimizer, preparer, train_loader, dev_loader, test_loader)
         self.result_folder_path = self.result_folder_init(config.model_save_name)
-        # uncomment to save model
-        # self.model_save_folder_path = self.checkpoint_folder_init(config.model_save_name)
+        self.model_save_folder_path = self.checkpoint_folder_init(config.model_save_name)
         self.config = config
         self.preparer = preparer
 
@@ -42,7 +41,7 @@ class DocEEBasicSeqLabelingTrainer(BasicTrainer):
         batch_step = 0
         epoch_loss = None
         error_num = 0
-        with tqdm(dataloader, unit="b", position=0, leave=True) as tqdm_epoch:
+        with tqdm(dataloader, unit="b", position=0, leave=True, disable=True) as tqdm_epoch:
             for batch in tqdm_epoch:
                 batch_step += 1
                 use_mix_bio = False if epoch <= 2 else True
@@ -67,7 +66,7 @@ class DocEEBasicSeqLabelingTrainer(BasicTrainer):
         epoch_loss = 0
         start_time = time.time()
         raw_results: List[dict] = []
-        for batch in tqdm(dataloader, unit="b", position=0, leave=True):
+        for batch in tqdm(dataloader, unit="b", position=0, leave=True, disable=True):
             loss, res = model_run_fn(self.model, batch, run_eval=run_eval, use_mix_bio=False)
             epoch_loss += loss.item()
             raw_results += res
@@ -94,9 +93,9 @@ class DocEEBasicSeqLabelingTrainer(BasicTrainer):
         for epoch in range(1, self.config.max_epochs + 1):
             epoch_formatted = self.epoch_format(epoch, 3)
             self.train_batch_template(model_run_fn, dataloader=train_loader, epoch=epoch)
-            # uncomment to save model
-            # model_save_path = self.model_save_folder_path / (self.config.model_save_name + '_' + epoch_formatted + '.pth')
-            # self.optimizer.save_model(model_save_path)
+            # save model checkpoint
+            model_save_path = self.model_save_folder_path / (self.config.model_save_name + '_' + epoch_formatted + '.pth')
+            self.optimizer.save_model(model_save_path)
             logging.info('Eval Epoch = {}, dev:'.format(epoch))
             dev_score_results, dev_raw_results = self.eval_batch_template(model_run_fn, score_fn=score_fn, dataloader=dev_loader, epoch=epoch)
             logging.info('Eval Epoch = {}, test:'.format(epoch))
